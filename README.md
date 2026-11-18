@@ -64,3 +64,6 @@ This version also tries to fix all the known issues and at times adds additional
       this issue.
       Solution (Fix) was:
       For all affected glyphs set "OT Glyph Class" to "Base Glyph"
+
+## Nerd Font Mono variant
+`nix-shell -p fontforge nerd-font-patcher --run ./build_nerd_mono.sh` produces `export/nf/MonofokiNerdFontMono-*.ttf` (family "Monofoki Nerd Font Mono").
