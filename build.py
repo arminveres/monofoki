@@ -6,10 +6,13 @@
   so they still connect from line to line.
 - Powerline extra glyphs that were ~1.7 cells wide are fit into one cell.
 - Missing symbols are added from monofoki, so terminals don't fall back to wide fonts.
+- Operators, arrows, bullets and shapes are centred vertically in the cell.
 OpenType features are added afterwards by build.sh (FontForge cannot parse our features.fea).
 """
+import math
 import os
 import plistlib
+import unicodedata
 import fontforge
 import psMat
 
@@ -89,6 +92,38 @@ def add_symbols(font, source):
         symbols.close()
 
 
+def is_centered_symbol(u):
+    """Operators, arrows, bullets, shapes: things that should share one vertical axis."""
+    if u < 0 or 0x2500 <= u <= 0x259F or 0x2800 <= u <= 0x28FF:  # box/block drawing, braille: cell-positioned
+        return False
+    if u in (0x2044, 0x2215) or unicodedata.decomposition(chr(u)).startswith(("<super>", "<sub>")):
+        return False  # fraction/division slash sit like "/", super/subscripts have their own position
+    cat = unicodedata.category(chr(u))
+    return cat == "Sm" or cat == "Pd" or u in (0x2A, 0x2022) or (cat == "So" and 0x2190 <= u <= 0x2BFF)
+
+
+def center_symbols(font):
+    """Put symbols on the cell's vertical centre, so e.g. ∙●∙ or ->=> line up regardless of who drew them."""
+    axis = (ASC - DESC) / 2
+    slant = math.tan(math.radians(-font.italicangle))
+
+    def depth(g):
+        return 1 + max(depth(font[r[0]]) for r in g.references) if g.references else 0
+
+    moved = []
+    for g in sorted(font.glyphs(), key=depth):  # bases first; composites then see the moved base
+        if not is_centered_symbol(g.unicode):
+            continue
+        _, ymin, _, ymax = g.boundingBox()
+        if ymax <= ymin or ymax - ymin > 750:  # empty, or spans the line like | and integral signs
+            continue
+        dy = axis - (ymin + ymax) / 2
+        g.transform(psMat.translate(dy * slant, dy))
+        g.width = WIDTH
+        moved.append(g.glyphname)
+    return moved
+
+
 def build(source, style, bold):
     font = fontforge.open(f"src/mononoki-{source}.ufo")
     add_symbols(font, source)
@@ -105,6 +140,7 @@ def build(source, style, bold):
             glyph.foreground = clean
         fix_direction(glyph)
     relink(font, {g.glyphname: g.references for g in font.glyphs() if g.references})
+    centered = center_symbols(font)
 
     # fit over-wide powerline glyphs into one cell
     for g in font.glyphs():
@@ -131,6 +167,7 @@ def build(source, style, bold):
         font.selection.select(*[g for g in font.glyphs() if g.unicode not in CELL and len(g.foreground)])
         font.changeWeight(BOLD_STROKE, "auto", 0, 0, "squish")
         relink(font, refs)
+        center_symbols(font)  # changeWeight's zone squish can grow symbols unevenly
         for g in font.glyphs():
             g.width = WIDTH if g.width else 0
         font.weight = "Bold"
@@ -170,6 +207,10 @@ def build(source, style, bold):
             fix_direction(g)
         g.round()
         g.addExtrema("all")
+
+    for name in centered:  # self-check: still centred after bold/unlink/overlap removal
+        _, ymin, _, ymax = font[name].boundingBox()
+        assert abs((ymin + ymax) / 2 - (ASC - DESC) / 2) <= 3, (style, name, ymin, ymax)
 
     os.makedirs("export", exist_ok=True)
     for ext in ("otf", "ttf"):
