@@ -6,6 +6,7 @@
   so they still connect from line to line.
 - Powerline extra glyphs that were ~1.7 cells wide are fit into one cell.
 - Missing symbols are added from monofoki, so terminals don't fall back to wide fonts.
+- A few more shapes (◎ ◆ ◇ ◌ ...) are derived from ● and ■.
 - Operators, arrows, bullets and shapes are centred vertically in the cell.
 OpenType features are added afterwards by build.sh (FontForge cannot parse our features.fea).
 """
@@ -92,6 +93,62 @@ def add_symbols(font, source):
         symbols.close()
 
 
+def add_derived_shapes(font):
+    """Shapes that neither mononoki nor monofoki have (e.g. ◎ ◆ in jj/git graphs), built from ● ■ so they
+    match; missing ones fall back to a proportional font and look shifted in the cell."""
+    by_u = {g.unicode: g for g in font.glyphs()}
+    cx = WIDTH / 2
+    _, ymin, _, ymax = by_u[0x25CF].boundingBox()
+    cy, r = (ymin + ymax) / 2, (ymax - ymin) / 2
+    ring_w = 38  # stroke of ○
+    box_w = 80  # stroke of □
+
+    def shape(u, size, filled=True, stroke=0, angle=0):
+        """● (u=0x25CF) or ■ (0x25A0) scaled to `size` wide, optionally hollow, centred in the cell."""
+        layer = fontforge.layer()
+        for outer, size_, rev in ((True, size, False), (False, size - 2 * stroke, True)):
+            if not outer and filled:
+                break
+            part = by_u[u].foreground
+            x0, y0, x1, y1 = by_u[u].boundingBox()
+            m = psMat.translate(-(x0 + x1) / 2, -(y0 + y1) / 2)
+            m = psMat.compose(m, psMat.scale(size_ / (x1 - x0), size_ / (y1 - y0)))
+            m = psMat.compose(m, psMat.rotate(math.radians(angle)))
+            part.transform(psMat.compose(m, psMat.translate(cx, cy)))
+            if rev:
+                for c in part:
+                    c.reverseDirection()
+            layer += part
+        return layer
+
+    d = 2 * r
+    diamond = d / math.sqrt(2)  # rotated square as wide as ●
+    new = {
+        0x25CE: shape(0x25CF, d, False, ring_w) + shape(0x25CF, d * 0.55, False, ring_w),  # ◎
+        0x25C9: shape(0x25CF, d, False, ring_w) + shape(0x25CF, d * 0.55),  # ◉
+        0x25EF: shape(0x25CF, d, False, ring_w),  # ◯
+        0x2B24: shape(0x25CF, d),  # ⬤
+        0x25E6: shape(0x25CF, d * 0.5, False, ring_w),  # ◦
+        0x25AA: shape(0x25A0, d * 0.5),  # ▪
+        0x25AB: shape(0x25A0, d * 0.5, False, ring_w),  # ▫
+        0x25C6: shape(0x25A0, diamond, angle=45),  # ◆
+        0x25C7: shape(0x25A0, diamond, False, box_w / math.sqrt(2), 45),  # ◇
+        0x25C8: shape(0x25A0, diamond, False, box_w / math.sqrt(2), 45) + shape(0x25A0, diamond * 0.4, angle=45),  # ◈
+    }
+    dot = fontforge.layer()  # ◌: ring of 12 dots
+    for i in range(12):
+        a = 2 * math.pi * i / 12
+        part = shape(0x25CF, ring_w * 1.4)
+        part.transform(psMat.translate((r - ring_w) * math.cos(a), (r - ring_w) * math.sin(a)))
+        dot += part
+    new[0x25CC] = dot
+    for u, layer in new.items():
+        if u not in by_u:
+            g = font.createChar(u, f"uni{u:04X}")
+            g.foreground = layer
+            g.width = WIDTH
+
+
 def is_centered_symbol(u):
     """Operators, arrows, bullets, shapes: things that should share one vertical axis."""
     if u < 0 or 0x2500 <= u <= 0x259F or 0x2800 <= u <= 0x28FF:  # box/block drawing, braille: cell-positioned
@@ -103,9 +160,8 @@ def is_centered_symbol(u):
 
 
 def center_symbols(font):
-    """Put symbols on the cell's vertical centre, so e.g. ∙●∙ or ->=> line up regardless of who drew them."""
+    """Centre symbols in the cell, so e.g. ∙●∙, ->=> or ◎─╮ line up regardless of who drew them or the slant."""
     axis = (ASC - DESC) / 2
-    slant = math.tan(math.radians(-font.italicangle))
 
     def depth(g):
         return 1 + max(depth(font[r[0]]) for r in g.references) if g.references else 0
@@ -114,11 +170,10 @@ def center_symbols(font):
     for g in sorted(font.glyphs(), key=depth):  # bases first; composites then see the moved base
         if not is_centered_symbol(g.unicode):
             continue
-        _, ymin, _, ymax = g.boundingBox()
+        xmin, ymin, xmax, ymax = g.boundingBox()
         if ymax <= ymin or ymax - ymin > 750:  # empty, or spans the line like | and integral signs
             continue
-        dy = axis - (ymin + ymax) / 2
-        g.transform(psMat.translate(dy * slant, dy))
+        g.transform(psMat.translate(WIDTH / 2 - (xmin + xmax) / 2, axis - (ymin + ymax) / 2))
         g.width = WIDTH
         moved.append(g.glyphname)
     return moved
@@ -127,6 +182,7 @@ def center_symbols(font):
 def build(source, style, bold):
     font = fontforge.open(f"src/mononoki-{source}.ufo")
     add_symbols(font, source)
+    add_derived_shapes(font)
 
     for glyph in font.glyphs():
         if glyph.unicode in CELL:
@@ -209,8 +265,9 @@ def build(source, style, bold):
         g.addExtrema("all")
 
     for name in centered:  # self-check: still centred after bold/unlink/overlap removal
-        _, ymin, _, ymax = font[name].boundingBox()
+        xmin, ymin, xmax, ymax = font[name].boundingBox()
         assert abs((ymin + ymax) / 2 - (ASC - DESC) / 2) <= 3, (style, name, ymin, ymax)
+        assert abs((xmin + xmax) / 2 - WIDTH / 2) <= 3, (style, name, xmin, xmax)
 
     os.makedirs("export", exist_ok=True)
     for ext in ("otf", "ttf"):
